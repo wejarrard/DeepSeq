@@ -99,7 +99,7 @@ def seq_indices_reverse_complement(seq_indices):
 
 def one_hot_reverse_complement(one_hot):
     *_, n, d = one_hot.shape
-    assert d == 4, "must be one hot encoding with last dimension equal to 4"
+    assert d == 5, "must be one hot encoding with last dimension equal to 4"
     return torch.flip(one_hot, (-1, -2))
 
 
@@ -203,6 +203,9 @@ class GenomicInterval:
 
         # Initialize a column of zeros for the reads
         reads_tensor = torch.zeros((end - start, 1), dtype=torch.float)
+        assert (
+            reads_tensor.shape[0] == one_hot.shape[0]
+        ), f"reads tensor must be same length as one hot tensor, reads: {reads_tensor.shape[0]} != one hot: {one_hot.shape[0]}"
         extended_data = torch.cat((one_hot, reads_tensor), dim=-1)
 
         df = process_pileups(self.pileup_dir, chr_name, start, end)
@@ -218,11 +221,11 @@ class GenomicInterval:
             # Update the respective position in the extended_data tensor
             extended_data[relative_position, 4] = count
 
+        if should_rc_aug:
+            extended_data = one_hot_reverse_complement(extended_data)
+
         if not return_augs:
             return extended_data
-
-        if should_rc_aug:
-            one_hot = one_hot_reverse_complement(one_hot)
 
         rand_shift_tensor = torch.tensor([rand_shift])
         rand_aug_bool_tensor = torch.tensor([should_rc_aug])
@@ -271,6 +274,8 @@ class GenomeIntervalDataset(Dataset):
         chr_name, start, end = (interval[0], interval[1], interval[2])
         chr_name = self.chr_bed_to_fasta_map.get(chr_name, chr_name)
 
+        # TODO: Add sample, positive or negative label, and change pileup_dir to one step up
+
         return self.processor(chr_name, start, end, return_augs=self.return_augs)
 
     def __len__(self):
@@ -280,24 +285,25 @@ class GenomeIntervalDataset(Dataset):
 def mask_sequence(input_tensor, mask_prob=0.15, mask_value=-1):
     """
     Masks the input sequence tensor with given probability.
-    Only masks the bases and other columns, leaving the last column untouched.
+    Masks the entire row including all columns.
     """
-    # Extract the part to mask (all columns except the last one)
-    sequence_tensor = input_tensor[:, :-1].clone()
-    labels = sequence_tensor.clone()
+    # Clone the input tensor to create labels
+    labels = input_tensor.clone()
 
-    # Calculate mask
+    # Calculate row mask
     mask_rows = torch.bernoulli(
-        torch.ones((sequence_tensor.shape[0], 1)) * mask_prob
+        torch.ones((input_tensor.shape[0], 1)) * mask_prob
     ).bool()
-    mask = mask_rows.repeat(1, sequence_tensor.shape[1])
 
-    # Replace the original sequence tensor with masked tensor where mask is True
-    sequence_tensor[mask] = mask_value
+    # Expand mask to all columns
+    mask = mask_rows.expand_as(input_tensor)
+
+    # Apply mask to input_tensor to create the masked tensor
+    masked_tensor = input_tensor.clone()
+    masked_tensor[mask] = mask_value
+
+    # Set the labels where mask is not True to -1 (or any invalid label)
     labels[~mask] = -1  # only calculate loss on masked tokens
-
-    # Construct the masked tensor by concatenating masked sequence and the last column
-    masked_tensor = torch.cat([sequence_tensor, input_tensor[:, -1:]], dim=-1)
 
     return masked_tensor, labels
 
@@ -308,12 +314,12 @@ class MaskedGenomeIntervalDataset(GenomeIntervalDataset):
         self.mask_prob = mask_prob
 
     def __getitem__(self, index):
-        seq, shift, aug = super(MaskedGenomeIntervalDataset, self).__getitem__(index)
+        seq = super(MaskedGenomeIntervalDataset, self).__getitem__(index)
 
         # Mask the sequence and get the labels
         masked_seq, labels = mask_sequence(seq, mask_prob=self.mask_prob)
 
-        return masked_seq, labels, shift, aug
+        return masked_seq
 
 
 if __name__ == "__main__":

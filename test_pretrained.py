@@ -16,14 +16,16 @@ dataset = MaskedGenomeIntervalDataset(
     bed_file="./data/atac_SRX5437818.filtered.bed",
     fasta_file="./data/genome.fa",
     pileup_dir="./data/cell_lines/LNCAP/SRX5437818.bowtie.sorted.nodup",
-    return_augs=True,
+    return_augs=False,
     rc_aug=False,
-    shift_augs=(-10, 10),
-    # mask_prob=0.15,
+    shift_augs=(-2, 2),
+    mask_prob=0.15,
     context_length=16_384,
 )
-
-# dataloader = DataLoader(masked_dataset, batch_size=32, shuffle=True)
+num_workers = 4
+dataloader = DataLoader(
+    dataset, batch_size=16, shuffle=True
+)  # , num_workers=num_workers)
 
 
 deepseq = DeepSeq.from_hparams(
@@ -53,4 +55,8 @@ model = HeadAdapterWrapper(
     post_transformer_embed=True,  # by default, embeddings are taken from after the final pointwise block w/ conv -> gelu - but if you'd like the embeddings right after the transformer block with a learned layernorm, set this to True
 ).to(device)
 
-print(model)
+for i, batch in enumerate(dataloader):
+    data = batch[0]
+    targets = batch[1]
+    print("data:", data)
+    print("targets:", targets)
