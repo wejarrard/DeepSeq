@@ -1,8 +1,8 @@
 import os
-import pandas as pd
+import polars as pl
 
 
-def check_overlap(row: pd.Series, df: pd.DataFrame, overlap: float) -> list:
+def check_overlap(row: pl.Series, df: pl.DataFrame, overlap: float) -> list:
     """Check for overlap in the DataFrame using a percentage."""
     start_tolerance = (row["end"] - row["start"]) * overlap
     end_tolerance = (row["end"] - row["start"]) * overlap
@@ -41,7 +41,7 @@ def get_cell_line_labels(cell_lines_directory: str) -> list:
 
 def consolidate_csvs(
     cell_lines_directory: str, overlap_fraction: float = 0.1
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     assert os.path.exists(
         cell_lines_directory
     ), f"{cell_lines_directory} does not exist."
@@ -60,12 +60,11 @@ def consolidate_csvs(
         for file in os.listdir(folder_path):
             if file.endswith((".bed", ".csv", "narrowPeak")):
                 file_path = os.path.join(folder_path, file)
-                df = pd.read_csv(
+                df = pl.read_csv(
                     file_path,
-                    delimiter="\t",
-                    usecols=[0, 1, 2],
-                    header=None,
-                    names=["chr_name", "start", "end"],
+                    separator="\t",
+                    columns=[0, 1, 2],
+                    new_columns=["chr_name", "start", "end"],
                 )
                 df["cell_line"] = folder
                 df[
@@ -74,7 +73,7 @@ def consolidate_csvs(
 
                 print(f"Processing {file_path}...")
                 for existing_df in dfs:
-                    for index, row in df.iterrows():
+                    for index, row in df.iter_rows():
                         overlapping_indices = check_overlap(
                             row, existing_df, overlap_fraction
                         )
@@ -103,7 +102,7 @@ def consolidate_csvs(
 
                 dfs.append(df)
 
-    consolidated_df = pd.concat(dfs, ignore_index=True)
+    consolidated_df = pl.concat(dfs)
     return consolidated_df
 
 
@@ -130,14 +129,14 @@ def generate_negative_rows(df, cell_lines_directory, window=16_500):
 
     for _, row in df.iterrows():
         overlapping_cell_lines = peaks_in_window(row, df, window)
-        negative_cell_lines = list(set(all_cell_lines) - set(overlapping_cell_lines))
+        negative_cell_lines = set(all_cell_lines) - set(overlapping_cell_lines)
 
         if negative_cell_lines:
             neg_row = {
                 "chr_name": row["chr_name"],
                 "start": row["end"] - (window // 2),
                 "end": row["start"] + (window // 2),
-                "cell_line": negative_cell_lines[0],
+                "cell_line": "negative",
                 "labels": ",".join(negative_cell_lines),
             }
             negatives.append(neg_row)
