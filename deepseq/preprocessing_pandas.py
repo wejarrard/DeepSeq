@@ -1,11 +1,20 @@
 import os
 import pandas as pd
+from typing import Union
 
 
-def check_overlap(row: pd.Series, df: pd.DataFrame, overlap: float) -> list:
-    """Check for overlap in the DataFrame using a percentage."""
-    start_tolerance = (row["end"] - row["start"]) * overlap
-    end_tolerance = (row["end"] - row["start"]) * overlap
+def check_overlap(
+    row: pd.Series, df: pd.DataFrame, overlap: Union[float, str] = "any"
+) -> list:
+    """Check for overlap in the DataFrame using a percentage or 'any' keyword."""
+
+    # If overlap is "any", then tolerances are 0 (any overlap)
+    if overlap == "any":
+        start_tolerance = 0
+        end_tolerance = 0
+    else:
+        start_tolerance = (row["end"] - row["start"]) * overlap
+        end_tolerance = (row["end"] - row["start"]) * overlap
 
     return df[
         (df["chr_name"] == row["chr_name"])
@@ -40,7 +49,7 @@ def get_cell_line_labels(cell_lines_directory: str) -> list:
 
 
 def consolidate_csvs(
-    cell_lines_directory: str, overlap_fraction: float = 0.1
+    cell_lines_directory: str, overlap: Union[float, str] = "any"
 ) -> pd.DataFrame:
     assert os.path.exists(
         cell_lines_directory
@@ -75,9 +84,7 @@ def consolidate_csvs(
                 print(f"Processing {file_path}...")
                 for existing_df in dfs:
                     for index, row in df.iterrows():
-                        overlapping_indices = check_overlap(
-                            row, existing_df, overlap_fraction
-                        )
+                        overlapping_indices = check_overlap(row, existing_df, overlap)
                         if overlapping_indices:
                             # Update overlapping rows in existing_df
                             existing_df.loc[
@@ -147,7 +154,7 @@ def generate_negative_rows(df, cell_lines_directory, window=16_500):
 
 
 if __name__ == "__main__":
-    positive = consolidate_csvs("data/cell_lines", 0.1)
+    positive = consolidate_csvs("data/cell_lines")
     negative = generate_negative_rows(positive, "data/cell_lines")
     df = pd.concat([positive, negative], ignore_index=True)
     df.to_csv("data/consolidated.bed", index=False, sep="\t", header=False)

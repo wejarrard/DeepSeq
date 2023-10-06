@@ -8,6 +8,9 @@ from random import randrange, random
 from pathlib import Path
 from pyfaidx import Fasta
 
+import pysam
+
+
 # helper functions
 
 
@@ -105,28 +108,74 @@ def one_hot_reverse_complement(one_hot):
 
 # PILEUP PROCESSING
 def process_pileups(pileup_dir, chr_name, start, end):
-    pileup_file = pileup_dir / f"{chr_name}.pileup"
-    assert pileup_file.exists(), f"pileup file for {chr_name} does not exist"
+    pileup_file = pileup_dir / f"{chr_name}.pileup.gz"
 
-    # Read the file with polars using the correct separator and new_columns arguments
-    df = pl.read_csv(
-        pileup_file,
-        separator="\t",
-        has_header=False,
-        new_columns=[
-            "chr_name",
-            "position",
-            "nucleotide",
-            "count",
-            "info",
-            "quality",
-        ],
+    assert pileup_file.exists(), f"pileup file for {pileup_file} does not exist"
+
+    tabixfile = pysam.TabixFile(pileup_file)
+
+    records = []
+    for rec in tabixfile.fetch(chr_name, start, end):
+        records.append(rec.split("\t"))
+
+    # Convert records to a DataFrame using Polars:
+    df = pl.DataFrame(
+        {
+            "chr_name": [rec[0] for rec in records],
+            "position": [int(rec[1]) for rec in records],
+            "nucleotide": [rec[2] for rec in records],
+            "count": [int(rec[3]) for rec in records],
+        }
     )
 
-    # Filter the DataFrame based on the start and end positions
-    df = df.filter((df["position"] >= (start)) & (df["position"] <= (end)))
-
     return df
+
+
+def one_hot_encode_(directory: Path, labels: str):
+    """
+    One hot encodes the labels
+    """
+    # Split the labels string into a list of labels
+    labels_list = labels.split(",")
+
+    # Get a list of all folders in the directory
+    folders = [f for f in directory.iterdir() if f.is_dir()]
+
+    # Create a tensor of zeros with the number of folders as the length
+    labels_tensor = torch.zeros(len(folders))
+
+    # Iterate over the folders and set the respective index to 1 if the folder name matches any label
+    for i, folder in enumerate(folders):
+        if folder.name in labels_list:
+            labels_tensor[i] = 1
+
+    return labels_tensor
+
+
+def mask_sequence(input_tensor, mask_prob=0.15, mask_value=-1):
+    """
+    Masks the input sequence tensor with given probability.
+    Masks the entire row including all columns.
+    """
+    # Clone the input tensor to create labels
+    labels = input_tensor.clone()
+
+    # Calculate row mask
+    mask_rows = torch.bernoulli(
+        torch.ones((input_tensor.shape[0], 1)) * mask_prob
+    ).bool()
+
+    # Expand mask to all columns
+    mask = mask_rows.expand_as(input_tensor)
+
+    # Apply mask to input_tensor to create the masked tensor
+    masked_tensor = input_tensor.clone()
+    masked_tensor[mask] = mask_value
+
+    # Set the labels where mask is not True to -1 (or any invalid label)
+    labels[~mask] = -1  # only calculate loss on masked tokens
+
+    return masked_tensor, labels
 
 
 class GenomicInterval:
@@ -134,7 +183,6 @@ class GenomicInterval:
         self,
         *,
         fasta_file,
-        pileup_dir,
         context_length=None,
         return_seq_indices=False,
         shift_augs=None,
@@ -142,17 +190,17 @@ class GenomicInterval:
     ):
         fasta_file = Path(fasta_file)
         assert fasta_file.exists(), "path to fasta file must exist"
-
-        self.seqs = Fasta(str(fasta_file))
+        self.fasta_path = str(fasta_file)
         self.return_seq_indices = return_seq_indices
         self.context_length = context_length
         self.shift_augs = shift_augs
         self.rc_aug = rc_aug
 
-        self.pileup_dir = Path(pileup_dir)
-        assert self.pileup_dir.exists(), "path to pileup directory must exist"
+    @property
+    def seqs(self):
+        return Fasta(self.fasta_path)
 
-    def __call__(self, chr_name, start, end, return_augs=False):
+    def __call__(self, chr_name, start, end, pileup_dir, return_augs=False):
         interval_length = end - start
         chromosome = self.seqs[chr_name]
         chromosome_length = len(chromosome)
@@ -208,7 +256,7 @@ class GenomicInterval:
         ), f"reads tensor must be same length as one hot tensor, reads: {reads_tensor.shape[0]} != one hot: {one_hot.shape[0]}"
         extended_data = torch.cat((one_hot, reads_tensor), dim=-1)
 
-        df = process_pileups(self.pileup_dir, chr_name, start, end)
+        df = process_pileups(pileup_dir, chr_name, start, end)
 
         # Iterate over the rows of the filtered DataFrame and update the reads_tensor with count data
         for row in df.iter_rows(named=True):
@@ -238,7 +286,7 @@ class GenomeIntervalDataset(Dataset):
         self,
         bed_file,
         fasta_file,
-        pileup_dir,
+        cell_lines_dir,
         filter_df_fn=identity,
         chr_bed_to_fasta_map=dict(),
         context_length=None,
@@ -259,10 +307,10 @@ class GenomeIntervalDataset(Dataset):
 
         self.chr_bed_to_fasta_map = chr_bed_to_fasta_map
         self.return_augs = return_augs
+        self.cell_lines_dir = Path(cell_lines_dir)
 
         self.processor = GenomicInterval(
             fasta_file=fasta_file,
-            pileup_dir=pileup_dir,
             context_length=context_length,
             return_seq_indices=return_seq_indices,
             shift_augs=shift_augs,
@@ -271,41 +319,28 @@ class GenomeIntervalDataset(Dataset):
 
     def __getitem__(self, ind):
         interval = self.df.row(ind)
-        chr_name, start, end = (interval[0], interval[1], interval[2])
+        chr_name, start, end, cell_line, labels = (
+            interval[0],
+            interval[1],
+            interval[2],
+            interval[3],
+            interval[4],
+        )
         chr_name = self.chr_bed_to_fasta_map.get(chr_name, chr_name)
 
-        # TODO: Add sample, positive or negative label, and change pileup_dir to one step up
+        labels_encoded = one_hot_encode_(self.cell_lines_dir, labels)
 
-        return self.processor(chr_name, start, end, return_augs=self.return_augs)
+        pileup_dir = self.cell_lines_dir / Path(cell_line) / "pileups/"
+
+        return (
+            self.processor(
+                chr_name, start, end, pileup_dir, return_augs=self.return_augs
+            ),
+            labels_encoded,
+        )
 
     def __len__(self):
         return len(self.df)
-
-
-def mask_sequence(input_tensor, mask_prob=0.15, mask_value=-1):
-    """
-    Masks the input sequence tensor with given probability.
-    Masks the entire row including all columns.
-    """
-    # Clone the input tensor to create labels
-    labels = input_tensor.clone()
-
-    # Calculate row mask
-    mask_rows = torch.bernoulli(
-        torch.ones((input_tensor.shape[0], 1)) * mask_prob
-    ).bool()
-
-    # Expand mask to all columns
-    mask = mask_rows.expand_as(input_tensor)
-
-    # Apply mask to input_tensor to create the masked tensor
-    masked_tensor = input_tensor.clone()
-    masked_tensor[mask] = mask_value
-
-    # Set the labels where mask is not True to -1 (or any invalid label)
-    labels[~mask] = -1  # only calculate loss on masked tokens
-
-    return masked_tensor, labels
 
 
 class MaskedGenomeIntervalDataset(GenomeIntervalDataset):
@@ -314,12 +349,12 @@ class MaskedGenomeIntervalDataset(GenomeIntervalDataset):
         self.mask_prob = mask_prob
 
     def __getitem__(self, index):
-        seq = super(MaskedGenomeIntervalDataset, self).__getitem__(index)
+        seq, labels = super(MaskedGenomeIntervalDataset, self).__getitem__(index)
 
         # Mask the sequence and get the labels
-        masked_seq, labels = mask_sequence(seq, mask_prob=self.mask_prob)
+        masked_seq, _ = mask_sequence(seq, mask_prob=self.mask_prob)
 
-        return masked_seq
+        return masked_seq, labels
 
 
 if __name__ == "__main__":
