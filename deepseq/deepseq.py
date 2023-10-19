@@ -290,7 +290,7 @@ class Attention(nn.Module):
 
         # whether to use tf gamma
 
-        self.use_tf_gamma = use_tf_gamma
+        self.use_tf_gamma = False
 
     def forward(self, x):
         n, h, device = x.shape[-2], self.heads, x.device

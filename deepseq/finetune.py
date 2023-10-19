@@ -1,16 +1,15 @@
-import torch
+from contextlib import contextmanager
+from copy import deepcopy
 from typing import Optional
 
-from copy import deepcopy
-from contextlib import contextmanager
+import torch
 import torch.nn.functional as F
-from torch import nn, einsum
-
+from discrete_key_value_bottleneck_pytorch import DiscreteKeyValueBottleneck
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-from deepseq.deepseq import DeepSeq, poisson_loss
+from torch import einsum, nn
 
-from discrete_key_value_bottleneck_pytorch import DiscreteKeyValueBottleneck
+from deepseq.deepseq import DeepSeq, poisson_loss
 
 
 def exists(val):
@@ -160,6 +159,10 @@ class HeadAdapterWrapper(nn.Module):
             transformer_embed_fn,
             nn.LayerNorm(enformer_hidden_dim) if post_transformer_embed else None,
         )
+
+        # self.to_tracks = Sequential(
+        #     nn.Linear(enformer_hidden_dim, num_tracks), output_activation
+        # )
 
         self.to_tracks = Sequential(
             nn.Linear(enformer_hidden_dim, num_tracks), output_activation

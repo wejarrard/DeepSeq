@@ -107,12 +107,12 @@ def one_hot_reverse_complement(one_hot):
 
 
 # PILEUP PROCESSING
-def process_pileups(pileup_dir, chr_name, start, end):
+def process_pileups(pileup_dir: Path, chr_name: str, start: int, end: int):
     pileup_file = pileup_dir / f"{chr_name}.pileup.gz"
 
     assert pileup_file.exists(), f"pileup file for {pileup_file} does not exist"
 
-    tabixfile = pysam.TabixFile(pileup_file)
+    tabixfile = pysam.TabixFile(str(pileup_file))
 
     records = []
     for rec in tabixfile.fetch(chr_name, start, end):
@@ -250,7 +250,7 @@ class GenomicInterval:
         one_hot = str_to_one_hot(seq)
 
         # Initialize a column of zeros for the reads
-        reads_tensor = torch.zeros((end - start, 1), dtype=torch.float)
+        reads_tensor = torch.zeros((one_hot.shape[0], 1), dtype=torch.float)
         assert (
             reads_tensor.shape[0] == one_hot.shape[0]
         ), f"reads tensor must be same length as one hot tensor, reads: {reads_tensor.shape[0]} != one hot: {one_hot.shape[0]}"
