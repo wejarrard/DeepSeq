@@ -9,11 +9,14 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter
+from transformers import get_linear_schedule_with_warmup
 
 from deepseq.data import MaskedGenomeIntervalDataset
 from deepseq.deepseq import DeepSeq
 from deepseq.earlystopping import EarlyStopping
 from deepseq.finetune import HeadAdapterWrapper
+from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
 from deepseq.training_utils import (
     TrainingParams,
     WarmupCosineSchedule,
@@ -26,13 +29,14 @@ from deepseq.training_utils import (
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
+############ HYPERPARAMETERS ############
 @dataclass
 class HyperParams:
     num_epochs: int = 2
     batch_size: int = 32 * torch.cuda.device_count() if torch.cuda.is_available() else 4
     learning_rate: float = 1e-4
-    early_stopping_patience: int = 20
-    early_stopping_check_frequency: int = 10_000
+    early_stopping_patience: int = 10
+    validation_check_frequency: int = 5_000 if torch.cuda.is_available() else 4
 
 
 def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
@@ -105,7 +109,7 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     )
 
     total_size = len(dataset)
-    valid_size = 20000
+    valid_size = 20000 if torch.cuda.is_available() else 8
     train_size = total_size - valid_size
 
     train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
@@ -148,10 +152,14 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     scaler = GradScaler()
 
     total_steps = len(train_loader) * hyperparams.num_epochs
-    warmup_steps = 0.1 * total_steps
+    warmup_steps = 0.1 * total_steps if torch.cuda.is_available() else 10
 
     scheduler = WarmupCosineSchedule(
         optimizer, warmup_steps=warmup_steps, total_steps=total_steps
+    )
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
 
     training_params = TrainingParams(
@@ -163,39 +171,84 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     )
 
     early_stopping = EarlyStopping(
-        model=model,
-        val_dataloader=valid_loader,
-        model_params=training_params,
         patience=hyperparams.early_stopping_patience,
-        check_frequency=hyperparams.early_stopping_check_frequency,  # patience * check_frequency = number of batches without improvement
         verbose=True,
         save_path=os.path.join(output_dir, "best_model.pth"),
+    )
+
+    ############ TENSORBOARD ############
+
+    writer = SummaryWriter(
+        log_dir="/opt/ml/output/tensorboard" if torch.cuda.is_available() else "output"
+    )
+
+    train_loss_tracker = TrainLossTracker(
+        criterion=criterion,
+        device=device,
+        writer=writer,
+        check_frequency=hyperparams.validation_check_frequency,
+    )
+
+    val_loss_calculator = ValidationLossCalculator(
+        val_dataloader=valid_loader,
+        criterion=criterion,
+        device=device,
+        writer=writer,
+        check_frequency=hyperparams.validation_check_frequency,
     )
 
     ############ TRAINING ############
 
     for epoch in range(hyperparams.num_epochs):
-        train_loss = train_one_epoch(
+        continue_training = train_one_epoch(
             model=model,
             params=training_params,
             train_loader=train_loader,
             early_stopping=early_stopping,
+            train_loss_tracker=train_loss_tracker,
+            val_loss_calculator=val_loss_calculator,
         )
-
-        print(f"Epoch {epoch} train loss: {train_loss:.6f}")
         print("-" * 80)
+        if not continue_training:
+            print("Early stopping criterion met. Stopping training.")
+            break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DeepSeq model on SageMaker.")
     parser.add_argument(
-        "--output-dir", type=str, default=os.environ.get("SM_OUTPUT_DATA_DIR", None)
+        "--output-dir", type=str, default=os.environ.get("SM_OUTPUT_DATA_DIR")
     )
     parser.add_argument(
-        "--data-dir", type=str, default=os.environ.get("SM_CHANNEL_TRAINING", None)
+        "--data-dir", type=str, default=os.environ.get("SM_CHANNEL_TRAINING")
     )
+
+    # Define command line arguments for hyperparameters with default values directly taken from HyperParams class
+    parser.add_argument("--num-epochs", type=int, default=HyperParams.num_epochs)
+    parser.add_argument("--batch-size", type=int, default=HyperParams.batch_size)
+    parser.add_argument(
+        "--learning-rate", type=float, default=HyperParams.learning_rate
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=HyperParams.early_stopping_patience,
+    )
+    parser.add_argument(
+        "--validation-check-frequency",
+        type=int,
+        default=HyperParams.validation_check_frequency,
+    )
+
     args = parser.parse_args()
 
-    hyperparams = HyperParams()
+    # Create hyperparams instance with values from command line arguments
+    hyperparams = HyperParams(
+        num_epochs=args.num_epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        early_stopping_patience=args.early_stopping_patience,
+        validation_check_frequency=args.validation_check_frequency,
+    )
 
     main(args.output_dir, args.data_dir, hyperparams)

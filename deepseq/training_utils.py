@@ -6,13 +6,16 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from enformer_pytorch import Enformer
+from regex import F
 from torch.cuda.amp import GradScaler
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import PreTrainedModel
 
 from deepseq.earlystopping import EarlyStopping
+from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
 
 
 def count_directories(path: str) -> int:
@@ -95,12 +98,13 @@ def train_one_epoch(
     model,
     params: TrainingParams,
     train_loader: DataLoader,
+    train_loss_tracker: TrainLossTracker,
+    val_loss_calculator: ValidationLossCalculator,
     early_stopping: EarlyStopping,
 ) -> float:
     model.train()
-    total_loss = 0.0
 
-    progress_bar = tqdm(train_loader, desc="Training")
+    progress_bar = train_loader if torch.cuda.is_available() else tqdm(train_loader)
 
     for batch_idx, batch in enumerate(progress_bar):
         inputs, targets = batch[0].to(params.device), batch[1].to(params.device)
@@ -125,14 +129,22 @@ def train_one_epoch(
         if params.scheduler:
             params.scheduler.step()
 
-        total_loss += loss.item()
+        # Log the training loss to TensorBoard
+        train_loss = train_loss_tracker(loss.item())
 
-        # Update tqdm
-        progress_bar.refresh()
+        # Calculate the validation loss and log it to TensorBoard
+        val_loss = val_loss_calculator(model)
 
-        if early_stopping(model):
+        if train_loss and val_loss is not None:
+            print(
+                f"Batch: {batch_idx} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {params.optimizer.param_groups[0]['lr']:.4f}"
+            )
+
+        if early_stopping(val_loss, model):
             print("Early stopping!")
-            break
+            return False
 
-    average_loss = total_loss / len(train_loader)
-    return average_loss
+        if type(progress_bar) == tqdm:
+            progress_bar.refresh()
+
+    return True
