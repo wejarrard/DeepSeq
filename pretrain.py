@@ -16,10 +16,10 @@ from deepseq.data import MaskedGenomeIntervalDataset
 from deepseq.deepseq import DeepSeq
 from deepseq.earlystopping import EarlyStopping
 from deepseq.finetune import HeadAdapterWrapper
+from deepseq.loss import FocalLoss
 from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
 from deepseq.training_utils import (
     TrainingParams,
-    WarmupCosineSchedule,
     count_directories,
     train_one_epoch,
     transfer_enformer_weights_to_,
@@ -37,6 +37,8 @@ class HyperParams:
     learning_rate: float = 1e-4
     early_stopping_patience: int = 10
     validation_check_frequency: int = 5_000 if torch.cuda.is_available() else 4
+    focal_loss_alpha: float = 1
+    focal_loss_gamma: float = 2
 
 
 def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
@@ -141,7 +143,9 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
 
     ############ TRAINING PARAMS ############
 
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = FocalLoss(
+        alpha=hyperparams.focal_loss_alpha, gamma=hyperparams.focal_loss_gamma
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=hyperparams.learning_rate,
@@ -153,10 +157,6 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
 
     total_steps = len(train_loader) * hyperparams.num_epochs
     warmup_steps = 0.1 * total_steps if torch.cuda.is_available() else 10
-
-    scheduler = WarmupCosineSchedule(
-        optimizer, warmup_steps=warmup_steps, total_steps=total_steps
-    )
 
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
@@ -239,6 +239,12 @@ if __name__ == "__main__":
         type=int,
         default=HyperParams.validation_check_frequency,
     )
+    parser.add_argument(
+        "--focal-loss-alpha", type=float, default=HyperParams.focal_loss_alpha
+    )
+    parser.add_argument(
+        "--focal-loss-gamma", type=float, default=HyperParams.focal_loss_gamma
+    )
 
     args = parser.parse_args()
 
@@ -249,6 +255,8 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         early_stopping_patience=args.early_stopping_patience,
         validation_check_frequency=args.validation_check_frequency,
+        focal_loss_alpha=args.focal_loss_alpha,
+        focal_loss_gamma=args.focal_loss_gamma,
     )
 
     main(args.output_dir, args.data_dir, hyperparams)

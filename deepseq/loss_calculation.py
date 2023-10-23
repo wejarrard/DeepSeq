@@ -63,37 +63,50 @@ class ValidationLossCalculator:
         self.val_dataloader = val_dataloader
         self.criterion = criterion
         self.device = device
-        self.writer = writer  # TensorBoard SummaryWriter
+        self.writer = writer
         self.check_frequency = check_frequency
         self.frequency_counter = 0
-        self.global_step = 0  # you can also pass this as an argument if it's being tracked outside this class
+        self.global_step = 0
 
     def __call__(self, model):
-        # Only calculate the loss at the specified frequency
         self.frequency_counter += 1
         if self.frequency_counter < self.check_frequency:
-            return None  # or you could return a default value indicating no calculation was done
+            return None, None
 
-        # Reset the counter and proceed with the calculation
         self.frequency_counter = 0
+        model.eval()
 
-        model.eval()  # Set the model to evaluation mode
         total_val_loss = 0.0
+        correct_predictions = 0  # track the number of correct predictions
+        total_predictions = 0  # track the total number of predictions
 
-        with torch.no_grad():  # Disable gradient calculation during validation
+        with torch.no_grad():
             for batch in self.val_dataloader:
                 inputs, targets = batch[0].to(self.device), batch[1].to(self.device)
                 outputs = model(inputs)
                 loss = self.criterion(outputs, targets)
-                print(loss.item())
                 total_val_loss += loss.item()
 
+                # Calculating accuracy
+                predicted = (
+                    torch.sigmoid(outputs) >= 0.5
+                )  # Convert outputs to probabilities and then to 0 or 1
+                correct_predictions += (
+                    (predicted == targets).sum().item()
+                )  # Sum all correct predictions in the batch
+                total_predictions += (
+                    targets.numel()
+                )  # Increment total predictions by the number of elements in targets
+
         average_val_loss = total_val_loss / len(self.val_dataloader)
+        val_accuracy = correct_predictions / total_predictions
 
-        # Log the average validation loss to TensorBoard
+        # Log values to TensorBoard
         self.writer.add_scalar("Loss/val", average_val_loss, self.global_step)
-        self.global_step += 1  # increment step
+        self.writer.add_scalar("Accuracy/val", val_accuracy, self.global_step)
 
-        model.train()  # Set the model back to training mode
+        self.global_step += 1
 
-        return average_val_loss
+        model.train()
+
+        return average_val_loss, val_accuracy

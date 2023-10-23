@@ -58,33 +58,6 @@ def transfer_enformer_weights_to_(
     return model
 
 
-class WarmupCosineSchedule(_LRScheduler):
-    def __init__(self, optimizer, warmup_steps, total_steps, last_epoch=-1):
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        super(WarmupCosineSchedule, self).__init__(optimizer, last_epoch)
-
-    def get_lr(self):
-        step = self.last_epoch
-        if step < self.warmup_steps:
-            return [base_lr * step / self.warmup_steps for base_lr in self.base_lrs]
-        return [
-            base_lr
-            * (
-                0.5
-                * (
-                    1.0
-                    + math.cos(
-                        math.pi
-                        * (step - self.warmup_steps)
-                        / (self.total_steps - self.warmup_steps)
-                    )
-                )
-            )
-            for base_lr in self.base_lrs
-        ]
-
-
 @dataclass
 class TrainingParams:
     optimizer: torch.optim.Optimizer
@@ -133,11 +106,11 @@ def train_one_epoch(
         train_loss = train_loss_tracker(loss.item())
 
         # Calculate the validation loss and log it to TensorBoard
-        val_loss = val_loss_calculator(model)
+        val_loss, val_acc = val_loss_calculator(model)
 
         if train_loss and val_loss is not None:
             print(
-                f"Batch: {batch_idx} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {params.optimizer.param_groups[0]['lr']:.4f}"
+                f"Batch: {batch_idx} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | LR: {params.optimizer.param_groups[0]['lr']:.4f}"
             )
 
         if early_stopping(val_loss, model):
