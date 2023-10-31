@@ -36,7 +36,7 @@ class HyperParams:
     batch_size: int = 32 * torch.cuda.device_count() if torch.cuda.is_available() else 4
     learning_rate: float = 1e-4
     early_stopping_patience: int = 10
-    validation_check_frequency: int = 5_000 if torch.cuda.is_available() else 4
+    validation_check_frequency: int = 10_000 if torch.cuda.is_available() else 4
     focal_loss_alpha: float = 1
     focal_loss_gamma: float = 2
 
