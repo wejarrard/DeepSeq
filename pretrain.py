@@ -28,12 +28,14 @@ from deepseq.training_utils import (
 # hide user warning
 warnings.filterwarnings("ignore", category=UserWarning)
 
+DISTRIBUTED = int(os.environ.get("SM_NUM_GPUS", torch.cuda.device_count())) > 1
+
 
 ############ HYPERPARAMETERS ############
 @dataclass
 class HyperParams:
     num_epochs: int = 2
-    batch_size: int = 32 * torch.cuda.device_count() if torch.cuda.is_available() else 4
+    batch_size: int = 32 if torch.cuda.is_available() else 4
     learning_rate: float = 1e-4
     early_stopping_patience: int = 10
     validation_check_frequency: int = 10_000 if torch.cuda.is_available() else 4
@@ -44,18 +46,34 @@ class HyperParams:
 def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     ############ DEVICE ############
 
-    gpu_ok = torch.cuda.is_available() and torch.cuda.get_device_capability() in (
-        (7, 0),
-        (8, 0),
-        (9, 0),
-    )
+    # Check for CUDA availability
+    if not torch.cuda.is_available():
+        device = torch.device("cpu")
+    else:
+        if DISTRIBUTED:
+            world_size = torch.cuda.device_count()
+            torch.distributed.init_process_group(
+                "nccl",
+                init_method="env://",
+                world_size=world_size,
+                rank=args.local_rank,
+            )
+            torch.cuda.set_device(args.local_rank)
+            device = torch.device(f"cuda:{args.local_rank}")
+        else:
+            device = torch.device("cuda")
 
-    if not gpu_ok:
-        warnings.warn(
-            "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower than expected."
+        # Checking GPU compatibility
+        gpu_ok = torch.cuda.get_device_capability() in (
+            (7, 0),
+            (8, 0),
+            (9, 0),
         )
-    # Initialize model and data
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if not gpu_ok:
+            warnings.warn(
+                "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower than expected."
+            )
 
     ############ MODEL ############
 
@@ -90,10 +108,15 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
         output_activation=head_out,
     )
 
-    if torch.cuda.device_count() > 1:
-        pass
-
-    model = model.to(device)
+    if DISTRIBUTED:
+        # https://github.com/dougsouza/pytorch-sync-batchnorm-example
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = model.to(device)
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[device], output_device=device
+        )
+    else:
+        model.to(device)
 
     model = torch.compile(model) if gpu_ok else model
 
@@ -120,18 +143,34 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
         train_size > 0
     ), f"The dataset only contains {total_size} samples, but {valid_size} samples are required for the validation set."
 
-    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
-
-    num_workers = cpu_count() if torch.cuda.is_available() else 0
+    num_workers = (
+        cpu_count() // torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
+    )
     print(f"Using {num_workers} workers")
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=hyperparams.batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-    )
+    if DISTRIBUTED:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset,
+            num_replicas=torch.cuda.device_count(),
+            rank=args.local_rank,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=hyperparams.batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=True,
+            shuffle=True,
+        )
+
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=hyperparams.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
 
     valid_loader = DataLoader(
         valid_dataset,
@@ -200,6 +239,9 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     ############ TRAINING ############
 
     for epoch in range(hyperparams.num_epochs):
+        if DISTRIBUTED:
+            train_sampler.set_epoch(epoch)
+
         continue_training = train_one_epoch(
             model=model,
             params=training_params,
@@ -244,6 +286,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--focal-loss-gamma", type=float, default=HyperParams.focal_loss_gamma
+    )
+    parser.add_argument(
+        "--local_rank", type=int, default=int(os.environ.get("SM_CURRENT_HOST_RANK", 0))
     )
 
     args = parser.parse_args()

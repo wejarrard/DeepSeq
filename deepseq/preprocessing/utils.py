@@ -1,6 +1,8 @@
 import os
 from typing import List
 
+CELL_LINES = []
+
 
 def get_cell_line_labels(cell_lines_directory: str) -> List[str]:
     assert os.path.exists(
@@ -14,5 +16,6 @@ def get_cell_line_labels(cell_lines_directory: str) -> List[str]:
         folder
         for folder in os.listdir(cell_lines_directory)
         if os.path.isdir(os.path.join(cell_lines_directory, folder))
-        and folder != "metadata"
+        and os.path.isdir(os.path.join(cell_lines_directory, folder, "peaks"))
+        and folder in CELL_LINES
     ]

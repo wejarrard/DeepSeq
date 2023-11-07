@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from enformer_pytorch import Enformer
-from regex import F
+from regex import D, F
 from torch.cuda.amp import GradScaler
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
@@ -16,6 +16,8 @@ from transformers import PreTrainedModel
 
 from deepseq.earlystopping import EarlyStopping
 from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
+
+DISTRIBUTED = int(os.environ.get("SM_NUM_GPUS", torch.cuda.device_count())) > 1
 
 
 def count_directories(path: str) -> int:
@@ -77,9 +79,7 @@ def train_one_epoch(
 ) -> float:
     model.train()
 
-    progress_bar = train_loader if torch.cuda.is_available() else tqdm(train_loader)
-
-    for batch_idx, batch in enumerate(progress_bar):
+    for batch_idx, batch in enumerate(train_loader):
         inputs, targets = batch[0].to(params.device), batch[1].to(params.device)
 
         params.optimizer.zero_grad()
@@ -102,22 +102,32 @@ def train_one_epoch(
         if params.scheduler:
             params.scheduler.step()
 
-        # Log the training loss to TensorBoard
-        train_loss = train_loss_tracker(loss.item())
+        if DISTRIBUTED:
+            loss_tensor = torch.tensor([loss.item()], device=params.device)
+            torch.distributed.all_reduce(loss_tensor)
+            loss_tensor /= torch.distributed.get_world_size()
+            loss_val = loss_tensor.item()
+            rank = torch.distributed.get_rank()
+        else:
+            loss_val = loss.item()
+            rank = 0
 
-        # Calculate the validation loss and log it to TensorBoard
-        val_loss, val_acc = val_loss_calculator(model)
+        if rank == 0:
+            # Log the training loss to TensorBoard
+            train_loss = train_loss_tracker(loss_val)
 
-        if train_loss and val_loss is not None:
-            print(
-                f"Batch: {batch_idx} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | LR: {params.optimizer.param_groups[0]['lr']:.4f}"
-            )
+            # Calculate the validation loss and log it to TensorBoard
+            val_loss, val_acc = val_loss_calculator(model)
 
-        if early_stopping(val_loss, model):
-            print("Early stopping!")
-            return False
+            if train_loss and val_loss is not None:
+                print(
+                    f"Batch: {batch_idx}/{len(train_loader)} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | LR: {params.optimizer.param_groups[0]['lr']:.4f}"
+                )
 
-        if type(progress_bar) == tqdm:
-            progress_bar.refresh()
+            if early_stopping(val_loss, model):
+                print("Early stopping!")
+                if DISTRIBUTED:
+                    torch.distributed.destroy_process_group()
+                return False
 
     return True
