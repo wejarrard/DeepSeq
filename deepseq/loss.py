@@ -1,3 +1,4 @@
+# loss.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,4 +25,4 @@ class FocalLoss(nn.Module):
 
 
 # Example of usage:
-criterion = FocalLoss(alpha=1, gamma=2)
+# criterion = FocalLoss(alpha=1, gamma=2)

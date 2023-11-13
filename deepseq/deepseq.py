@@ -1,19 +1,17 @@
 import math
+import os
 from pathlib import Path
 
 import torch
-from torch import nn, einsum
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint_sequential
-
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
-
-from deepseq.data import str_to_one_hot, seq_indices_to_one_hot
+from torch import einsum, nn
+from torch.utils.checkpoint import checkpoint_sequential
+from transformers import PreTrainedModel
 
 from deepseq.config import EnformerConfig
-
-from transformers import PreTrainedModel
+from deepseq.data import seq_indices_to_one_hot, str_to_one_hot
 
 # constants
 
@@ -24,7 +22,7 @@ TARGET_LENGTH = 896
 # addressing a difference between xlogy results from tensorflow and pytorch
 # solution came from @johahi
 
-DIR = Path(__file__).parents[0]
+DIR = Path(os.environ.get("SM_CHANNEL_TRAINING", Path(__file__).parents[0]))
 TF_GAMMAS = torch.load(str(DIR / "precomputed" / "tf_gammas.pt"))
 
 # helpers

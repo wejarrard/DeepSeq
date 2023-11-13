@@ -1,32 +1,35 @@
+# pretrain.py
 import argparse
 import os
 import warnings
 from dataclasses import dataclass
 from multiprocessing import cpu_count
 
+import pysam
 import torch
 import torch.nn as nn
+from earlystopping import EarlyStopping
 from einops.layers.torch import Rearrange
+from finetune import HeadAdapterWrapper
+from loss import FocalLoss
+from loss_calculation import TrainLossTracker, ValidationLossCalculator
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
-from transformers import get_linear_schedule_with_warmup
-
-from deepseq.data import MaskedGenomeIntervalDataset
-from deepseq.deepseq import DeepSeq
-from deepseq.earlystopping import EarlyStopping
-from deepseq.finetune import HeadAdapterWrapper
-from deepseq.loss import FocalLoss
-from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
-from deepseq.training_utils import (
+from training_utils import (
     TrainingParams,
     count_directories,
     train_one_epoch,
     transfer_enformer_weights_to_,
 )
+from transformers import get_linear_schedule_with_warmup
+
+from data import MaskedGenomeIntervalDataset
+from deepseq import DeepSeq
 
 # hide user warning
 warnings.filterwarnings("ignore", category=UserWarning)
+pysam.set_verbosity(0)
 
 DISTRIBUTED = int(os.environ.get("SM_NUM_GPUS", torch.cuda.device_count())) > 1
 
@@ -35,10 +38,11 @@ DISTRIBUTED = int(os.environ.get("SM_NUM_GPUS", torch.cuda.device_count())) > 1
 @dataclass
 class HyperParams:
     num_epochs: int = 2
-    batch_size: int = 32 if torch.cuda.is_available() else 4
+    batch_size: int = 16 if torch.cuda.is_available() else 4
+
     learning_rate: float = 1e-4
     early_stopping_patience: int = 10
-    validation_check_frequency: int = 10_000 if torch.cuda.is_available() else 4
+    validation_check_frequency: int = 2_000 if torch.cuda.is_available() else 4
     focal_loss_alpha: float = 1
     focal_loss_gamma: float = 2
 
@@ -49,6 +53,7 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     # Check for CUDA availability
     if not torch.cuda.is_available():
         device = torch.device("cpu")
+        gpu_ok = False
     else:
         if DISTRIBUTED:
             world_size = torch.cuda.device_count()
@@ -89,21 +94,19 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
         num_downsamples=5,
     ).to(device)
 
-    deepseq = transfer_enformer_weights_to_(
-        deepseq, transformer_only=True
-    )  # NOTE: We are not going to freeze any weights, can try that later (maybe only the transformer layer)
+    deepseq = transfer_enformer_weights_to_(deepseq, transformer_only=True)
 
     head_out = nn.Sequential(
         Rearrange("b t c -> b c t"),
-        nn.AvgPool1d(8),
-        Rearrange("b c t -> b (c t)"),  # Flatten channel and time dimensions
+        nn.AvgPool1d(4),
+        Rearrange("b c t -> b (c t)"),
         nn.Linear(in_features=128, out_features=num_cell_lines),
         nn.Sigmoid(),
     )
 
     model = HeadAdapterWrapper(
         enformer=deepseq,
-        num_tracks=num_cell_lines,
+        num_tracks=1,
         post_transformer_embed=True,
         output_activation=head_out,
     )
@@ -118,12 +121,13 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     else:
         model.to(device)
 
-    model = torch.compile(model) if gpu_ok else model
+    # model = torch.compile(model) if gpu_ok else model
+    model = torch.compile(model) if torch.cuda.is_available() else model
 
     ############ DATA ############
 
     dataset = MaskedGenomeIntervalDataset(
-        bed_file=os.path.join(data_dir, "consolidated.bed"),
+        bed_file=os.path.join(data_dir, "combined.bed"),
         fasta_file=os.path.join(data_dir, "genome.fa"),
         cell_lines_dir=os.path.join(data_dir, "cell_lines/"),
         return_augs=False,
@@ -134,7 +138,7 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     )
 
     total_size = len(dataset)
-    valid_size = 20000 if torch.cuda.is_available() else 8
+    valid_size = 20_000 if torch.cuda.is_available() else 8
     train_size = total_size - valid_size
 
     train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
@@ -144,7 +148,10 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     ), f"The dataset only contains {total_size} samples, but {valid_size} samples are required for the validation set."
 
     num_workers = (
-        cpu_count() // torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
+        6
+        if torch.cuda.device_count() > 0
+        else 0
+        # cpu_count() // torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
     )
     print(f"Using {num_workers} workers")
 

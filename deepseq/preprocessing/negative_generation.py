@@ -120,6 +120,8 @@ if __name__ == "__main__":
     print("Sorting dataframe...")
     positive_sorted = sort(positive)
 
+    print(positive_sorted)
+
     # Generate negative samples
     negative = generate_negative_samples(
         positive=positive_sorted, cell_lines=cell_lines

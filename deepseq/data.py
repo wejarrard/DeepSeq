@@ -1,15 +1,14 @@
+import time
+from pathlib import Path
+from random import random, randrange
+
+import numpy as np
+import polars as pl
+import pysam
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
-
-import polars as pl
-import numpy as np
-from random import randrange, random
-from pathlib import Path
 from pyfaidx import Fasta
-
-import pysam
-
+from torch.utils.data import Dataset
 
 # helper functions
 
@@ -124,7 +123,7 @@ def process_pileups(pileup_dir: Path, chr_name: str, start: int, end: int):
             "chr_name": [rec[0] for rec in records],
             "position": [int(rec[1]) for rec in records],
             "nucleotide": [rec[2] for rec in records],
-            "count": [int(rec[3]) for rec in records],
+            "count": [float(rec[3]) for rec in records],
         }
     )
 
@@ -202,7 +201,15 @@ class GenomicInterval:
 
     def __call__(self, chr_name, start, end, pileup_dir, return_augs=False):
         interval_length = end - start
-        chromosome = self.seqs[chr_name]
+        try:
+            seqs = self.seqs
+        except Exception:
+            time.sleep(2)
+            seqs = self.seqs
+        try:
+            chromosome = seqs[chr_name]
+        except:
+            chromosome = seqs[chr_name[3:]]
         chromosome_length = len(chromosome)
 
         if exists(self.shift_augs):
@@ -330,7 +337,7 @@ class GenomeIntervalDataset(Dataset):
 
         labels_encoded = one_hot_encode_(self.cell_lines_dir, labels)
 
-        pileup_dir = self.cell_lines_dir / Path(cell_line) / "pileups/"
+        pileup_dir = self.cell_lines_dir / Path(cell_line) / "pileup/"
 
         return (
             self.processor(

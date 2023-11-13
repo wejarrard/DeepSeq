@@ -49,8 +49,8 @@ class EarlyStopping:
                 return True
         else:
             # Improvement in the loss, reset the counter and save the current model
-            self.best_loss = val_loss
             self.save_checkpoint(val_loss, model)
+            self.best_loss = val_loss
             self.patience_counter = 0
 
         return False  # Continue training

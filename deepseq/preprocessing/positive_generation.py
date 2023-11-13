@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from typing import Union
 
 import pandas as pd
+import polars as pl
 import pyranges as pr
 from tqdm import tqdm
 from utils import get_cell_line_labels
@@ -29,7 +30,7 @@ def process_row(gr):
         "Start": gr["Start"],
         "End": gr["End"],
         "source": gr["source"],
-        "labels": ", ".join(overlapping_names),
+        "labels": ",".join(overlapping_names),
     }
 
     return consolidated_entry
@@ -111,4 +112,6 @@ if __name__ == "__main__":
         "/data1/projects/human_cistrome/aligned_chip_data/merged_cell_lines",
         num_cores=num_cores,
     )
-    positive.to_csv("positive.bed", index=False, sep="\t", header=False)
+    positive = pl.from_pandas(positive)
+    sorted_df = positive.sort(by=["Chromosome", "Start", "End"])
+    positive.write_csv("data/positive.bed", separator="\t", has_header=False)
