@@ -1,18 +1,21 @@
+# training_utils.py
 import os
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from earlystopping import EarlyStopping
 from enformer_pytorch import Enformer
-from loss_calculation import TrainLossTracker, ValidationLossCalculator
 from regex import D, F
-from torch.cuda.amp.grad_scaler import GradScaler
+from torch.cuda.amp import GradScaler
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import PreTrainedModel
+
+from deepseq.earlystopping import EarlyStopping
+from deepseq.loss_calculation import TrainLossTracker, ValidationLossCalculator
 
 DISTRIBUTED = int(os.environ.get("SM_NUM_GPUS", torch.cuda.device_count())) > 1
 

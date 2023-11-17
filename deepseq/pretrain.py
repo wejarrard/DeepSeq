@@ -7,15 +7,17 @@ from multiprocessing import cpu_count
 
 import pysam
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from earlystopping import EarlyStopping
 from einops.layers.torch import Rearrange
 from finetune import HeadAdapterWrapper
 from loss import FocalLoss
 from loss_calculation import TrainLossTracker, ValidationLossCalculator
-from torch.cuda.amp import GradScaler
+from torch.cuda.amp.grad_scaler import GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard.writer import SummaryWriter
 from training_utils import (
     TrainingParams,
     count_directories,
@@ -24,7 +26,7 @@ from training_utils import (
 )
 from transformers import get_linear_schedule_with_warmup
 
-from data import MaskedGenomeIntervalDataset
+from data import GenomeIntervalDataset
 from deepseq import DeepSeq
 
 # hide user warning
@@ -47,6 +49,23 @@ class HyperParams:
     focal_loss_gamma: float = 2
 
 
+def get_params_without_weight_decay_ln(named_params, weight_decay):
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in named_params if not any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [p for n, p in named_params if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    return optimizer_grouped_parameters
+
+
 def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     ############ DEVICE ############
 
@@ -56,13 +75,7 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
         gpu_ok = False
     else:
         if DISTRIBUTED:
-            world_size = torch.cuda.device_count()
-            torch.distributed.init_process_group(
-                "nccl",
-                init_method="env://",
-                world_size=world_size,
-                rank=args.local_rank,
-            )
+            dist.init_process_group(backend="nccl")
             torch.cuda.set_device(args.local_rank)
             device = torch.device(f"cuda:{args.local_rank}")
         else:
@@ -115,9 +128,8 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
         # https://github.com/dougsouza/pytorch-sync-batchnorm-example
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = model.to(device)
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[device], output_device=device
-        )
+        model = DDP(model, find_unused_parameters=True)
+
     else:
         model.to(device)
 
@@ -126,14 +138,13 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
 
     ############ DATA ############
 
-    dataset = MaskedGenomeIntervalDataset(
+    dataset = GenomeIntervalDataset(
         bed_file=os.path.join(data_dir, "combined.bed"),
         fasta_file=os.path.join(data_dir, "genome.fa"),
         cell_lines_dir=os.path.join(data_dir, "cell_lines/"),
         return_augs=False,
         rc_aug=False,
-        shift_augs=(-10, 10),
-        mask_prob=0.15,
+        shift_augs=(0, 0),
         context_length=16_384,
     )
 
@@ -148,17 +159,16 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
     ), f"The dataset only contains {total_size} samples, but {valid_size} samples are required for the validation set."
 
     num_workers = (
-        6
+        (cpu_count() // torch.cuda.device_count()) - 1
         if torch.cuda.device_count() > 0
         else 0
-        # cpu_count() // torch.cuda.device_count() if torch.cuda.device_count() > 0 else 0
     )
     print(f"Using {num_workers} workers")
 
     if DISTRIBUTED:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset,
-            num_replicas=torch.cuda.device_count(),
+            num_replicas=dist.get_world_size(),
             rank=args.local_rank,
         )
         train_loader = DataLoader(
@@ -167,7 +177,6 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
             sampler=train_sampler,
             num_workers=num_workers,
             pin_memory=True,
-            shuffle=True,
         )
 
     else:
@@ -189,11 +198,13 @@ def main(output_dir: str, data_dir: str, hyperparams: HyperParams) -> None:
 
     ############ TRAINING PARAMS ############
 
-    criterion = FocalLoss(
-        alpha=hyperparams.focal_loss_alpha, gamma=hyperparams.focal_loss_gamma
+    param_groups = get_params_without_weight_decay_ln(
+        model.named_parameters(), weight_decay=0.1
     )
+
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        param_groups,
         lr=hyperparams.learning_rate,
         weight_decay=0.1,
         betas=(0.9, 0.999),
@@ -295,7 +306,7 @@ if __name__ == "__main__":
         "--focal-loss-gamma", type=float, default=HyperParams.focal_loss_gamma
     )
     parser.add_argument(
-        "--local_rank", type=int, default=int(os.environ.get("SM_CURRENT_HOST_RANK", 0))
+        "--local_rank", type=int, default=int(os.environ.get("LOCAL_RANK", 0))
     )
 
     args = parser.parse_args()

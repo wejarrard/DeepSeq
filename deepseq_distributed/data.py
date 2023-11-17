@@ -130,6 +130,27 @@ def process_pileups(pileup_dir: Path, chr_name: str, start: int, end: int):
     return df
 
 
+def one_hot_encode_(directory: Path, labels: str):
+    """
+    One hot encodes the labels
+    """
+    # Split the labels string into a list of labels
+    labels_list = labels.split(",")
+
+    # Get a list of all folders in the directory
+    folders = [f for f in directory.iterdir() if f.is_dir()]
+
+    # Create a tensor of zeros with the number of folders as the length
+    labels_tensor = torch.zeros(len(folders))
+
+    # Iterate over the folders and set the respective index to 1 if the folder name matches any label
+    for i, folder in enumerate(folders):
+        if folder.name in labels_list:
+            labels_tensor[i] = 1
+
+    return labels_tensor
+
+
 def mask_sequence(input_tensor, mask_prob=0.15, mask_value=-1):
     """
     Masks the input sequence tensor with given probability.
@@ -302,23 +323,6 @@ class GenomeIntervalDataset(Dataset):
             shift_augs=shift_augs,
             rc_aug=rc_aug,
         )
-        self.label_folders = sorted(
-            [f for f in self.cell_lines_dir.iterdir() if f.is_dir()],
-            key=lambda x: x.name,
-        )
-
-    def one_hot_encode_(self, labels):
-        """
-        One hot encodes the labels using the pre-initialized list of folders
-        """
-        labels_list = labels.split(",")
-
-        labels_tensor = torch.zeros(len(self.label_folders))
-
-        for i, folder in enumerate(self.label_folders):
-            if folder.name in labels_list:
-                labels_tensor[i] = 1
-        return labels_tensor
 
     def __getitem__(self, ind):
         interval = self.df.row(ind)
@@ -331,7 +335,7 @@ class GenomeIntervalDataset(Dataset):
         )
         chr_name = self.chr_bed_to_fasta_map.get(chr_name, chr_name)
 
-        labels_encoded = self.one_hot_encode_(labels)
+        labels_encoded = one_hot_encode_(self.cell_lines_dir, labels)
 
         pileup_dir = self.cell_lines_dir / Path(cell_line) / "pileup/"
 

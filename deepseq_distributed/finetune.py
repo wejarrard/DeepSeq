@@ -10,7 +10,7 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import einsum, nn
 
-from deepseq import DeepSeq, poisson_loss
+from deepseq.deepseq import DeepSeq, poisson_loss
 
 
 def exists(val):

@@ -4,14 +4,14 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from config import EnformerConfig
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
 from torch import einsum, nn
 from torch.utils.checkpoint import checkpoint_sequential
 from transformers import PreTrainedModel
 
-from data import seq_indices_to_one_hot, str_to_one_hot
+from deepseq.config import EnformerConfig
+from deepseq.data import seq_indices_to_one_hot, str_to_one_hot
 
 # constants
 
